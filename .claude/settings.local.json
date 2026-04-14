@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C D:/Projects/CalScan status)",
+      "Bash(wsl --list --quiet)"
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+﻿[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "calscan"
+version = "0.1.0"
+description = "Extract calendar events from photos and export to .ics"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40.0",
+    "icalendar>=5.0.0",
+    "click>=8.0.0",
+    "python-dateutil>=2.8.0",
+    "Pillow>=10.0.0",
+]
+
+[project.scripts]
+calscan = "calscan.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["calscan"]
