@@ -1,10 +1,14 @@
 ﻿import anthropic
 import base64
+import io
 import json
 from datetime import date
 from pathlib import Path
 
-MEDIA_TYPES = {
+from PIL import Image
+
+
+SUPPORTED_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
@@ -31,10 +35,19 @@ If you see recurring events, include each occurrence as a separate object."""
 
 def _encode_image(image_path: str) -> tuple[str, str]:
     path = Path(image_path)
-    media_type = MEDIA_TYPES.get(path.suffix.lower(), "image/jpeg")
-    with open(image_path, "rb") as fh:
-        data = base64.standard_b64encode(fh.read()).decode("utf-8")
-    return data, media_type
+    media_type = SUPPORTED_TYPES.get(path.suffix.lower())
+
+    if media_type:
+        with open(image_path, "rb") as fh:
+            data = base64.standard_b64encode(fh.read()).decode("utf-8")
+        return data, media_type
+
+    # Unsupported format (BMP, TIFF, etc.) - convert to PNG automatically
+    img = Image.open(image_path).convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
+    return data, "image/png"
 
 
 def extract_events(image_path: str, year: int | None = None) -> list[dict]:
