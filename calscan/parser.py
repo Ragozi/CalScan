@@ -1,4 +1,4 @@
-﻿from dataclasses import dataclass
+﻿from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Optional
 
@@ -14,6 +14,7 @@ class CalendarEvent:
     description: Optional[str]
     location: Optional[str]
     all_day: bool
+    recurring_note: Optional[str] = field(default=None)
 
 
 def _parse_time(value: str | None) -> Optional[time]:
@@ -49,6 +50,7 @@ def parse_events(raw_events: list[dict]) -> list[CalendarEvent]:
                 description=raw.get("description") or None,
                 location=raw.get("location") or None,
                 all_day=all_day,
+                recurring_note=raw.get("recurring_note") or None,
             )
         )
 
