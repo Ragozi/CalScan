@@ -1,12 +1,14 @@
-﻿import anthropic
+import anthropic
 import base64
 import io
 import json
+import logging
 from datetime import date
 from pathlib import Path
 
 from PIL import Image
 
+log = logging.getLogger("calscan")
 
 SUPPORTED_TYPES = {
     ".jpg": "image/jpeg",
@@ -59,7 +61,74 @@ RETURN only a valid JSON array. No markdown fences, no explanation, no prose —
 ]
 
 If you cannot determine the year from the image, assume {year}.
+
+{filter_instruction}"""
+
+FIX_PROMPT = """\
+The JSON you returned could not be parsed. The error was: {error}
+
+Your previous (broken) output started with:
+{preview}
+
+Return ONLY the corrected, complete, valid JSON array — no explanation, no markdown fences.
 """
+
+
+def _call_claude(client: anthropic.Anthropic, messages: list[dict]) -> str:
+    """Make an API call and return the text content."""
+    with client.messages.stream(
+        model="claude-opus-4-6",
+        max_tokens=8192,
+        messages=messages,
+    ) as stream:
+        response = stream.get_final_message()
+
+    if response.stop_reason == "max_tokens":
+        log.warning("Response hit max_tokens limit — output may be truncated")
+
+    raw = next(
+        (block.text for block in response.content if block.type == "text"), ""
+    ).strip()
+
+    # Strip markdown fences if Claude added them despite instructions
+    if raw.startswith("```"):
+        lines = raw.splitlines()
+        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+    return raw
+
+
+def _parse_with_retry(client: anthropic.Anthropic, messages: list[dict], max_retries: int = 2) -> list[dict]:
+    """Call Claude, parse JSON, and retry up to max_retries times on failure."""
+    raw = _call_claude(client, messages)
+
+    for attempt in range(max_retries + 1):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            if attempt == max_retries:
+                raise ValueError(
+                    f"Claude returned invalid JSON after {max_retries + 1} attempt(s). "
+                    f"Last error: {exc}. Raw output preview: {raw[:300]!r}"
+                ) from exc
+
+            log.warning(f"JSON parse failed (attempt {attempt + 1}): {exc} — asking Claude to fix it")
+
+            fix_message = {
+                "role": "user",
+                "content": FIX_PROMPT.format(
+                    error=str(exc),
+                    preview=raw[:500],
+                ),
+            }
+            # Build conversation: original exchange + Claude's bad reply + fix request
+            fix_messages = messages + [
+                {"role": "assistant", "content": raw},
+                fix_message,
+            ]
+            raw = _call_claude(client, fix_messages)
+
+    raise ValueError("Unreachable")  # satisfies type checkers
 
 
 def _encode_image(image_path: str) -> tuple[str, str]:
@@ -71,6 +140,7 @@ def _encode_image(image_path: str) -> tuple[str, str]:
             data = base64.standard_b64encode(fh.read()).decode("utf-8")
         return data, media_type
 
+    # Auto-convert unsupported formats (BMP, TIFF, HEIC, etc.) to PNG
     img = Image.open(image_path).convert("RGB")
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -78,43 +148,40 @@ def _encode_image(image_path: str) -> tuple[str, str]:
     return data, "image/png"
 
 
-def extract_events(image_path: str, year: int | None = None) -> list[dict]:
-    """Send a calendar image to Claude and return a list of raw event dicts."""
-    client = anthropic.Anthropic()
+def extract_events(image_path: str, year: int | None = None, filter_prompt: str | None = None) -> list[dict]:
+    """Send a calendar image to Claude and return a list of raw event dicts.
 
+    filter_prompt: optional natural language instruction, e.g. "only include hockey events"
+    """
+    client = anthropic.Anthropic()
     image_data, media_type = _encode_image(image_path)
     default_year = year or date.today().year
-    prompt = EXTRACTION_PROMPT.format(year=default_year)
 
-    with client.messages.stream(
-        model="claude-opus-4-6",
-        max_tokens=8192,
-        thinking={"type": "adaptive"},
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": image_data,
-                        },
+    filter_instruction = ""
+    if filter_prompt and filter_prompt.strip():
+        filter_instruction = (
+            f"IMPORTANT — USER FILTER INSTRUCTION (apply this before returning results):\n"
+            f"{filter_prompt.strip()}\n"
+            f"Only include events that match this instruction. Exclude everything else."
+        )
+
+    prompt = EXTRACTION_PROMPT.format(year=default_year, filter_instruction=filter_instruction)
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": image_data,
                     },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
-    ) as stream:
-        response = stream.get_final_message()
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
 
-    raw = next(
-        (block.text for block in response.content if block.type == "text"), ""
-    ).strip()
-
-    if raw.startswith("```"):
-        lines = raw.splitlines()
-        raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-
-    return json.loads(raw)
+    return _parse_with_retry(client, messages)

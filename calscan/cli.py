@@ -16,8 +16,9 @@ from .vision import extract_events
 @click.option("--output", "-o", default=None, help="Output .ics file path.")
 @click.option("--year", "-y", default=None, type=int, help="Default year if not visible in image.")
 @click.option("--timezone", "-t", default="UTC", help="Timezone, e.g. America/New_York.")
+@click.option("--filter", "-f", "filter_prompt", default=None, help='Only extract matching events, e.g. "only hockey games".')
 @click.option("--verbose", "-v", is_flag=True, help="Print each extracted event.")
-def main(image_path, output, year, timezone, verbose):
+def main(image_path, output, year, timezone, filter_prompt, verbose):
     """CalScan — extract calendar events from an image and export to .ics.
 
     \b
@@ -30,7 +31,7 @@ def main(image_path, output, year, timezone, verbose):
     click.echo(f"Scanning {image_path} …")
 
     try:
-        raw_events = extract_events(image_path, year=year)
+        raw_events = extract_events(image_path, year=year, filter_prompt=filter_prompt)
     except Exception as exc:
         click.echo(f"Error during vision extraction: {exc}", err=True)
         sys.exit(1)

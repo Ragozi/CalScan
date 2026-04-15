@@ -1,4 +1,4 @@
-﻿"""CalScan FastAPI backend — zero data retention photo-to-calendar service."""
+"""CalScan FastAPI backend — zero data retention photo-to-calendar service."""
 
 import logging
 import os
@@ -9,6 +9,7 @@ from typing import Annotated
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -54,9 +55,15 @@ async def scan_calendar(
     calendar_name: Annotated[str, Form()] = "CalScan",
     return_ics: Annotated[bool, Form()] = False,
     timezone: Annotated[str, Form()] = "UTC",
+    filter_prompt: Annotated[str | None, Form(description='Optional filter, e.g. "only hockey games"')] = None,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> JSONResponse:
-    """Upload a calendar photo. Photo is deleted immediately after processing."""
+    """Upload a calendar photo. Photo is deleted immediately after processing.
+
+    Returns extracted events as JSON. Optionally returns ICS content.
+    Use filter_prompt to limit extraction (e.g. 'only include soccer games for Jake').
+    Then POST selected events to /build-ics to get a filtered ICS file.
+    """
     _require_api_key(x_api_key)
 
     tmp_path: str | None = None
@@ -68,9 +75,9 @@ async def scan_calendar(
             contents = await photo.read()
             tmp.write(contents)
 
-        log.info(f"Processing upload | filename={photo.filename} | size={len(contents)} bytes")
+        log.info(f"Processing upload | filename={photo.filename} | size={len(contents)} bytes | filter={filter_prompt!r}")
 
-        raw_events = extract_events(tmp_path, year=year)
+        raw_events = extract_events(tmp_path, year=year, filter_prompt=filter_prompt)
         events = parse_events(raw_events)
         log.info(f"Extracted {len(events)} event(s)")
 
@@ -115,6 +122,37 @@ async def scan_calendar(
     return JSONResponse(content=payload)
 
 
+class BuildIcsRequest(BaseModel):
+    events: list[dict]
+    calendar_name: str = "CalScan"
+    timezone: str = "UTC"
+
+
+@app.post("/build-ics", tags=["scan"])
+async def build_ics(
+    body: BuildIcsRequest,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> JSONResponse:
+    """Convert a (possibly user-edited) list of events into an ICS string.
+
+    Call /scan first to get the event list, let the user deselect/edit events
+    in the UI, then POST only the events they want here to get the final ICS.
+    """
+    _require_api_key(x_api_key)
+
+    events = parse_events(body.events)
+    if not events:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No valid events provided.",
+        )
+
+    ics_content = generate_ics_string(events, calendar_name=body.calendar_name, timezone=body.timezone)
+    log.info(f"Built ICS for {len(events)} user-selected event(s)")
+
+    return JSONResponse(content={"ics_content": ics_content, "event_count": len(events)})
+
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
