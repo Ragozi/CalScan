@@ -79,6 +79,13 @@ def health_check() -> dict:
     }
 
 
+@app.get("/debug-env", tags=["ops"])
+def debug_env() -> dict:
+    """Lists which expected env vars are present (no values exposed)."""
+    keys_to_check = ["ANTHROPIC_API_KEY", "CALSCAN_API_KEY", "PORT", "RAILWAY_ENVIRONMENT"]
+    return {k: bool(os.getenv(k)) for k in keys_to_check}
+
+
 # ---------------------------------------------------------------------------
 # POST /scan
 # ---------------------------------------------------------------------------
