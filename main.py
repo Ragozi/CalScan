@@ -81,7 +81,7 @@ async def scan_calendar(
     photo: Annotated[UploadFile, File(description="Calendar image (JPEG, PNG, WEBP, GIF, BMP, TIFF)")],
     filter: Annotated[str | None, Form(description='Natural language filter, e.g. "only hockey games"')] = None,
     timezone: Annotated[str, Form(description='IANA timezone, e.g. "America/New_York"')] = "UTC",
-    return_ics: Annotated[bool, Form(description="Include ics_content string in response")] = False,
+    return_ics: Annotated[bool, Form(description="Include ics_content string in response")] = True,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> JSONResponse:
     """Scan a calendar photo and return structured events.
