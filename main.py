@@ -8,6 +8,7 @@ from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -30,10 +31,20 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Allow the Lovable PWA (and any browser client) to call this API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
+
+PORT = int(os.getenv("PORT", 8080))
 CALSCAN_API_KEY: str | None = os.getenv("CALSCAN_API_KEY")
 
 
 def _require_api_key(x_api_key: str | None) -> None:
+    """If CALSCAN_API_KEY is set in env, enforce it. Otherwise open for dev."""
     if not CALSCAN_API_KEY:
         return
     if x_api_key != CALSCAN_API_KEY:
@@ -43,26 +54,42 @@ def _require_api_key(x_api_key: str | None) -> None:
         )
 
 
+def _error(message: str, code: int = 422) -> JSONResponse:
+    """Consistent error envelope so clients always get the same shape."""
+    log.error(message)
+    return JSONResponse(
+        status_code=code,
+        content={"success": False, "message": message},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /health
+# ---------------------------------------------------------------------------
+
 @app.get("/health", tags=["ops"])
 def health_check() -> dict:
     return {"status": "ok", "service": "CalScan API", "version": "1.0.0"}
 
 
+# ---------------------------------------------------------------------------
+# POST /scan
+# ---------------------------------------------------------------------------
+
 @app.post("/scan", tags=["scan"])
 async def scan_calendar(
-    photo: Annotated[UploadFile, File(description="Calendar image")],
-    year: Annotated[int | None, Form()] = None,
-    calendar_name: Annotated[str, Form()] = "CalScan",
-    return_ics: Annotated[bool, Form()] = False,
-    timezone: Annotated[str, Form()] = "UTC",
-    filter_prompt: Annotated[str | None, Form(description='Optional filter, e.g. "only hockey games"')] = None,
+    photo: Annotated[UploadFile, File(description="Calendar image (JPEG, PNG, WEBP, GIF, BMP, TIFF)")],
+    filter: Annotated[str | None, Form(description='Natural language filter, e.g. "only hockey games"')] = None,
+    timezone: Annotated[str, Form(description='IANA timezone, e.g. "America/New_York"')] = "UTC",
+    return_ics: Annotated[bool, Form(description="Include ics_content string in response")] = False,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> JSONResponse:
-    """Upload a calendar photo. Photo is deleted immediately after processing.
+    """Scan a calendar photo and return structured events.
 
-    Returns extracted events as JSON. Optionally returns ICS content.
-    Use filter_prompt to limit extraction (e.g. 'only include soccer games for Jake').
-    Then POST selected events to /build-ics to get a filtered ICS file.
+    - Photo is deleted immediately after processing (zero data retention).
+    - Use `filter` to limit results: "only soccer games", "just events for Jake", etc.
+    - Set `return_ics=true` to get a ready-to-download ICS string in one shot.
+    - Or call POST /build-ics separately after the user edits the event list.
     """
     _require_api_key(x_api_key)
 
@@ -75,14 +102,17 @@ async def scan_calendar(
             contents = await photo.read()
             tmp.write(contents)
 
-        log.info(f"Processing upload | filename={photo.filename} | size={len(contents)} bytes | filter={filter_prompt!r}")
+        log.info(
+            "Scan request | file=%s | size=%d bytes | filter=%r | tz=%s | return_ics=%s",
+            photo.filename, len(contents), filter, timezone, return_ics,
+        )
 
-        raw_events = extract_events(tmp_path, year=year, filter_prompt=filter_prompt)
+        raw_events = extract_events(tmp_path, filter_prompt=filter)
         events = parse_events(raw_events)
-        log.info(f"Extracted {len(events)} event(s)")
+        log.info("Extracted %d event(s)", len(events))
 
     except Exception as exc:
-        log.exception("Error during event extraction")
+        log.exception("Extraction failed")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Could not extract events: {exc}",
@@ -91,7 +121,7 @@ async def scan_calendar(
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
-            log.info(f"PHOTO DELETED for privacy | path={tmp_path}")
+            log.info("PHOTO DELETED | path=%s", tmp_path)
 
     serialized = [
         {
@@ -102,30 +132,30 @@ async def scan_calendar(
             "location": ev.location,
             "description": ev.description,
             "all_day": ev.all_day,
-            "recurring_note": ev.recurring_note,
         }
         for ev in events
     ]
 
     payload: dict = {
+        "success": True,
         "events": serialized,
-        "event_count": len(serialized),
-        "photo_deleted": True,
-        "message": f"Successfully extracted {len(serialized)} event(s). Photo deleted immediately after processing.",
+        "message": f"Found {len(serialized)} event(s). Photo deleted.",
     }
 
     if return_ics:
-        payload["ics_content"] = generate_ics_string(
-            events, calendar_name=calendar_name, timezone=timezone
-        )
+        payload["ics_content"] = generate_ics_string(events, timezone=timezone)
 
     return JSONResponse(content=payload)
 
 
+# ---------------------------------------------------------------------------
+# POST /build-ics  — accepts a user-curated event list, returns ICS
+# ---------------------------------------------------------------------------
+
 class BuildIcsRequest(BaseModel):
     events: list[dict]
-    calendar_name: str = "CalScan"
     timezone: str = "UTC"
+    calendar_name: str = "CalScan"
 
 
 @app.post("/build-ics", tags=["scan"])
@@ -133,10 +163,13 @@ async def build_ics(
     body: BuildIcsRequest,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> JSONResponse:
-    """Convert a (possibly user-edited) list of events into an ICS string.
+    """Convert a user-curated event list into a downloadable ICS string.
 
-    Call /scan first to get the event list, let the user deselect/edit events
-    in the UI, then POST only the events they want here to get the final ICS.
+    Typical flow:
+    1. POST /scan  → get full event list, show it to user with checkboxes
+    2. User deselects unwanted events
+    3. POST /build-ics with only the selected events → get ics_content
+    4. Trigger browser download of ics_content as schedule.ics
     """
     _require_api_key(x_api_key)
 
@@ -144,15 +177,25 @@ async def build_ics(
     if not events:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="No valid events provided.",
+            detail="No valid events in request.",
         )
 
-    ics_content = generate_ics_string(events, calendar_name=body.calendar_name, timezone=body.timezone)
-    log.info(f"Built ICS for {len(events)} user-selected event(s)")
+    ics_content = generate_ics_string(
+        events, calendar_name=body.calendar_name, timezone=body.timezone
+    )
+    log.info("Built ICS | %d event(s) | tz=%s", len(events), body.timezone)
 
-    return JSONResponse(content={"ics_content": ics_content, "event_count": len(events)})
+    return JSONResponse(content={
+        "success": True,
+        "ics_content": ics_content,
+        "event_count": len(events),
+    })
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8080, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
