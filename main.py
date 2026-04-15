@@ -69,7 +69,14 @@ def _error(message: str, code: int = 422) -> JSONResponse:
 
 @app.get("/health", tags=["ops"])
 def health_check() -> dict:
-    return {"status": "ok", "service": "CalScan API", "version": "1.0.0"}
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    return {
+        "status": "ok",
+        "service": "CalScan API",
+        "version": "1.0.0",
+        "anthropic_key_set": bool(api_key),
+        "anthropic_key_prefix": api_key[:14] + "..." if api_key else "MISSING",
+    }
 
 
 # ---------------------------------------------------------------------------
