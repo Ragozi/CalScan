@@ -19,19 +19,27 @@ SUPPORTED_TYPES = {
 }
 
 EXTRACTION_PROMPT = """\
-You are a sports and calendar schedule extraction specialist. Your task is to extract EVERY event from this image with complete accuracy.
+You are a calendar and schedule extraction specialist. Your task is to extract EVERY event from this image with complete accuracy.
+
+You can handle any type of schedule or event source, including:
+- Sports schedules (games, practices, tournaments)
+- Booking confirmations (appointments, classes, sessions)
+- School or work calendars
+- Printed or handwritten schedules
+- Screenshots of confirmation emails or booking pages
+- Whiteboard or paper schedules
 
 EXTRACTION RULES:
 1. Extract ALL events visible — no matter how small, faint, or crowded
-2. For sports schedules: capture game/practice times, team names, Home vs Away designation, field/venue
-3. For recurring events: list EACH individual occurrence as its own separate event object
-4. For time zones: if a timezone is shown, include it in the description field
-5. Location field: if "Home" or "Away" is indicated, include that explicitly (e.g. "Home - Lincoln Field" or "Away @ Riverside Park")
-6. Handle handwritten text, printed paper schedules, screenshots, and photos of whiteboards
+2. For single-event confirmations (e.g. a booking confirmation): extract that one event with all available details
+3. For sports schedules: capture game/practice times, team names, Home vs Away designation, field/venue
+4. For recurring events: list EACH individual occurrence as its own separate event object
+5. For time zones: if a timezone is shown, include it in the description field
+6. Location field: include the venue, address, or Home/Away designation when shown
 7. If a month/year header is visible, apply it to all events under that header
 8. Common abbreviations to recognize: H=Home, A=Away, TBA/TBD=null start_time, vs/v=versus, @=at (away)
 9. If a score is shown next to a past event, include it in the description field
-10. Practice sessions, scrimmages, playoffs, and tournaments should all be extracted
+10. Include any staff, instructor, or provider names in the description field
 
 DATE HANDLING:
 - Full date shown (e.g. "Sat Jan 15"): parse completely
@@ -80,6 +88,7 @@ def _call_claude(client: anthropic.Anthropic, messages: list[dict]) -> str:
         model="claude-opus-4-6",
         max_tokens=8192,
         messages=messages,
+        timeout=60.0,
     ) as stream:
         response = stream.get_final_message()
 
