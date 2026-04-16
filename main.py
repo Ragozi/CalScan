@@ -16,7 +16,7 @@ load_dotenv()
 
 from calscan.ics_generator import generate_ics_string
 from calscan.parser import parse_events
-from calscan.vision import extract_events
+from calscan.vision import extract_events, extract_events_from_text
 
 logging.basicConfig(
     level=logging.INFO,
@@ -204,6 +204,77 @@ async def build_ics(
         "ics_content": ics_content,
         "event_count": len(events),
     })
+
+
+# ---------------------------------------------------------------------------
+# POST /voice-scan  — parses a voice-dictated or typed description into events
+# ---------------------------------------------------------------------------
+
+class VoiceScanRequest(BaseModel):
+    text: str
+    timezone: str = "UTC"
+    return_ics: bool = True
+    filter: str | None = None
+
+
+@app.post("/voice-scan", tags=["scan"])
+async def voice_scan(
+    body: VoiceScanRequest,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> JSONResponse:
+    """Parse a voice-dictated or typed calendar description into structured events.
+
+    - Send the raw transcribed text (from Web Speech API or any STT)
+    - Returns the same shape as POST /scan
+    - Set return_ics=true to get a ready-to-download ICS string
+    """
+    _require_api_key(x_api_key)
+
+    if not body.text or not body.text.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="text field is required and cannot be empty.",
+        )
+
+    log.info(
+        "Voice scan request | text_len=%d | filter=%r | tz=%s | return_ics=%s",
+        len(body.text), body.filter, body.timezone, body.return_ics,
+    )
+
+    try:
+        raw_events = extract_events_from_text(body.text, filter_prompt=body.filter)
+        events = parse_events(raw_events)
+        log.info("Extracted %d event(s) from voice input", len(events))
+    except Exception as exc:
+        log.exception("Voice extraction failed")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Could not extract events: {exc}",
+        ) from exc
+
+    serialized = [
+        {
+            "title": ev.title,
+            "date": ev.date.isoformat(),
+            "start_time": ev.start_time.strftime("%H:%M") if ev.start_time else None,
+            "end_time": ev.end_time.strftime("%H:%M") if ev.end_time else None,
+            "location": ev.location,
+            "description": ev.description,
+            "all_day": ev.all_day,
+        }
+        for ev in events
+    ]
+
+    payload: dict = {
+        "success": True,
+        "events": serialized,
+        "message": f"Found {len(serialized)} event(s) from voice input.",
+    }
+
+    if body.return_ics:
+        payload["ics_content"] = generate_ics_string(events, timezone=body.timezone)
+
+    return JSONResponse(content=payload)
 
 
 # ---------------------------------------------------------------------------

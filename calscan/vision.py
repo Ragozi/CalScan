@@ -85,6 +85,43 @@ If you cannot determine the year from the image, assume {year}.
 
 {filter_instruction}"""
 
+VOICE_PROMPT = """\
+The user has dictated the following calendar entry by voice. Extract every event described and return them as a JSON array.
+
+USER'S DICTATION:
+{text}
+
+EXTRACTION RULES:
+1. Parse natural language dates and times — "this Saturday", "next Tuesday at 3", "every Thursday through June"
+2. For recurring events: list EACH individual occurrence as its own separate event object
+3. If no year is mentioned, assume {year}
+4. If no end time is mentioned, set end_time to null
+5. If no specific time is mentioned, set all_day to true
+6. Include any person names, team names, locations, or notes in the appropriate fields
+7. If the user mentions a relative day ("tomorrow", "next week"), interpret relative to today's date: {today}
+
+Examples of what users might say:
+- "Jake has soccer practice every Tuesday at 4pm at Riverside Park through June"
+- "Doctor appointment Friday the 18th at 2:30"
+- "Team dinner Saturday night at 7 at Carmine's, bring the whole family"
+
+RETURN only a valid JSON array. No markdown fences, no explanation — just the raw JSON array.
+
+[
+  {{
+    "title": "string — clear event name",
+    "date": "YYYY-MM-DD",
+    "start_time": "HH:MM or null",
+    "end_time": "HH:MM or null",
+    "location": "string or null",
+    "description": "string or null — any extra details the user mentioned",
+    "all_day": false,
+    "recurring_note": "string or null — ONLY on first occurrence if recurring"
+  }}
+]
+
+{filter_instruction}"""
+
 FIX_PROMPT = """\
 The JSON you returned could not be parsed. The error was: {error}
 
@@ -203,6 +240,41 @@ def extract_events(image_path: str, year: int | None = None, filter_prompt: str 
                 },
                 {"type": "text", "text": prompt},
             ],
+        }
+    ]
+
+    return _parse_with_retry(client, messages)
+
+
+def extract_events_from_text(text: str, year: int | None = None, filter_prompt: str | None = None) -> list[dict]:
+    """Parse a voice-dictated or typed calendar description into structured events.
+
+    text: the raw dictated string from the user
+    filter_prompt: optional natural language filter
+    """
+    client = anthropic.Anthropic()
+    today = date.today()
+    default_year = year or today.year
+
+    filter_instruction = ""
+    if filter_prompt and filter_prompt.strip():
+        filter_instruction = (
+            f"IMPORTANT — USER FILTER INSTRUCTION (apply this before returning results):\n"
+            f"{filter_prompt.strip()}\n"
+            f"Only include events that match this instruction. Exclude everything else."
+        )
+
+    prompt = VOICE_PROMPT.format(
+        text=text.strip(),
+        year=default_year,
+        today=today.isoformat(),
+        filter_instruction=filter_instruction,
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": prompt,
         }
     ]
 
