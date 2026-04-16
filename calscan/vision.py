@@ -21,25 +21,38 @@ SUPPORTED_TYPES = {
 EXTRACTION_PROMPT = """\
 You are a calendar and schedule extraction specialist. Your task is to extract EVERY event from this image with complete accuracy.
 
-You can handle any type of schedule or event source, including:
-- Sports schedules (games, practices, tournaments)
-- Booking confirmations (appointments, classes, sessions)
-- School or work calendars
-- Printed or handwritten schedules
-- Screenshots of confirmation emails or booking pages
-- Whiteboard or paper schedules
+STEP 1 — CLASSIFY THE IMAGE (do this silently, do not output it):
+Determine which category best describes the image:
+  A) SPORTS SCHEDULE — season schedule, game/practice list, team calendar, tournament bracket
+  B) SINGLE EVENT — booking confirmation, appointment reminder, class confirmation, ticket, receipt with a date/time
+  C) GENERAL CALENDAR — school calendar, work schedule, monthly/weekly planner, printed agenda
 
-EXTRACTION RULES:
-1. Extract ALL events visible — no matter how small, faint, or crowded
-2. For single-event confirmations (e.g. a booking confirmation): extract that one event with all available details
-3. For sports schedules: capture game/practice times, team names, Home vs Away designation, field/venue
-4. For recurring events: list EACH individual occurrence as its own separate event object
-5. For time zones: if a timezone is shown, include it in the description field
-6. Location field: include the venue, address, or Home/Away designation when shown
-7. If a month/year header is visible, apply it to all events under that header
-8. Common abbreviations to recognize: H=Home, A=Away, TBA/TBD=null start_time, vs/v=versus, @=at (away)
-9. If a score is shown next to a past event, include it in the description field
-10. Include any staff, instructor, or provider names in the description field
+STEP 2 — APPLY THE RIGHT EXTRACTION LOGIC:
+
+If Category A (SPORTS SCHEDULE):
+- Extract every game, practice, scrimmage, and tournament as individual events
+- Capture team names, Home vs Away designation (H/A/@/vs), field/venue
+- Recognize abbreviations: H=Home, A=Away, TBA/TBD=null time, vs/v=versus, @=at (away)
+- Include scores from past games in the description field
+- List EACH recurring occurrence as its own separate event
+
+If Category B (SINGLE EVENT / BOOKING CONFIRMATION):
+- Extract the one event with all available details
+- Title should be the service/class/appointment type (e.g. "50 Minute Stretch Session")
+- Include provider, instructor, or staff name in description (e.g. "Flexologist: Jeff")
+- Include the business/venue name in location
+- Capture exact start and end times
+
+If Category C (GENERAL CALENDAR):
+- Extract ALL visible events — no matter how small or crowded
+- Apply any visible month/year header to events that only show a day number
+- Include any noted location, teacher, or organizer details
+
+UNIVERSAL RULES (apply to all categories):
+1. Never skip an event — extract everything visible
+2. For recurring events: list EACH occurrence as its own separate event object
+3. If a timezone is shown, include it in the description field
+4. Staff, instructor, provider, or coach names belong in the description field
 
 DATE HANDLING:
 - Full date shown (e.g. "Sat Jan 15"): parse completely
