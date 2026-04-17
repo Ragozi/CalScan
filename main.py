@@ -3,13 +3,15 @@
 import logging
 import os
 import tempfile
+import time
+import uuid
 from pathlib import Path
 from typing import Annotated
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 load_dotenv()
@@ -40,6 +42,19 @@ app.add_middleware(
 
 PORT = int(os.getenv("PORT", 8080))
 CALSCAN_API_KEY: str | None = os.getenv("CALSCAN_API_KEY")
+
+# In-memory ICS store: {uuid: (ics_content, expires_at)}
+# Entries expire after 5 minutes. Zero calendar data is persisted to disk.
+_ics_store: dict[str, tuple[str, float]] = {}
+ICS_TTL_SECONDS = 300  # 5 minutes
+
+
+def _purge_expired_ics() -> None:
+    """Remove expired entries from the in-memory ICS store."""
+    now = time.time()
+    expired = [k for k, (_, exp) in _ics_store.items() if exp < now]
+    for k in expired:
+        del _ics_store[k]
 
 
 def _require_api_key(x_api_key: str | None) -> None:
@@ -252,6 +267,59 @@ async def voice_scan(
         payload["ics_content"] = generate_ics_string(events, timezone=body.timezone)
 
     return JSONResponse(content=payload)
+
+
+# ---------------------------------------------------------------------------
+# POST /store-ics  +  GET /ics/{token}
+# Temporary ICS hosting so Android can open webcal:// links instead of
+# downloading a blob/data-URI. Data lives only in RAM, expires in 5 min.
+# ---------------------------------------------------------------------------
+
+class StoreIcsRequest(BaseModel):
+    ics_content: str
+
+
+@app.post("/store-ics", tags=["scan"])
+async def store_ics(
+    body: StoreIcsRequest,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> JSONResponse:
+    """Store ICS content in memory for 5 minutes and return a serving URL."""
+    _require_api_key(x_api_key)
+
+    if not body.ics_content or not body.ics_content.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="ics_content is required.",
+        )
+
+    _purge_expired_ics()
+
+    token = uuid.uuid4().hex
+    _ics_store[token] = (body.ics_content, time.time() + ICS_TTL_SECONDS)
+    log.info("Stored ICS | token=%s | expires_in=%ds", token, ICS_TTL_SECONDS)
+
+    return JSONResponse(content={"token": token})
+
+
+@app.get("/ics/{token}", tags=["scan"])
+def serve_ics(token: str) -> Response:
+    """Serve a previously stored ICS file by token. No auth required (token is the secret)."""
+    _purge_expired_ics()
+
+    entry = _ics_store.get(token)
+    if not entry:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="ICS not found or expired.",
+        )
+
+    ics_content, _ = entry
+    return Response(
+        content=ics_content,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="calscan.ics"'},
+    )
 
 
 # ---------------------------------------------------------------------------
