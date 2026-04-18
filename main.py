@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile, status
+from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
@@ -57,6 +57,24 @@ def _purge_expired_ics() -> None:
         del _ics_store[k]
 
 
+def _store_and_build_urls(ics_content: str, request: Request) -> tuple[str, str]:
+    """
+    Store ICS in memory and return (ics_url, webcal_url).
+
+    ics_url   — https://... — direct download link
+    webcal_url — webcal://... — opens native calendar app on iOS/Android
+    """
+    _purge_expired_ics()
+    token = uuid.uuid4().hex
+    _ics_store[token] = (ics_content, time.time() + ICS_TTL_SECONDS)
+    log.info("Auto-stored ICS | token=%s", token)
+
+    base = str(request.base_url).rstrip("/")
+    ics_url = f"{base}/ics/{token}"
+    webcal_url = ics_url.replace("https://", "webcal://").replace("http://", "webcal://")
+    return ics_url, webcal_url
+
+
 def _require_api_key(x_api_key: str | None) -> None:
     if not CALSCAN_API_KEY:
         return
@@ -95,6 +113,7 @@ def debug_env() -> dict:
 
 @app.post("/scan", tags=["scan"])
 async def scan_calendar(
+    request: Request,
     photo: Annotated[UploadFile, File(description="Calendar image (JPEG, PNG, WEBP, GIF, BMP, TIFF)")],
     filter: Annotated[str | None, Form(description='Natural language filter, e.g. "only hockey games"')] = None,
     timezone: Annotated[str, Form(description='IANA timezone, e.g. "America/New_York"')] = "UTC",
@@ -160,7 +179,11 @@ async def scan_calendar(
     }
 
     if return_ics:
-        payload["ics_content"] = generate_ics_string(events, timezone=timezone)
+        ics_content = generate_ics_string(events, timezone=timezone)
+        ics_url, webcal_url = _store_and_build_urls(ics_content, request)
+        payload["ics_content"] = ics_content
+        payload["ics_url"] = ics_url
+        payload["webcal_url"] = webcal_url
 
     return JSONResponse(content=payload)
 
@@ -177,6 +200,7 @@ class BuildIcsRequest(BaseModel):
 
 @app.post("/build-ics", tags=["scan"])
 async def build_ics(
+    request: Request,
     body: BuildIcsRequest,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> JSONResponse:
@@ -193,11 +217,14 @@ async def build_ics(
     ics_content = generate_ics_string(
         events, calendar_name=body.calendar_name, timezone=body.timezone
     )
+    ics_url, webcal_url = _store_and_build_urls(ics_content, request)
     log.info("Built ICS | %d event(s) | tz=%s", len(events), body.timezone)
 
     return JSONResponse(content={
         "success": True,
         "ics_content": ics_content,
+        "ics_url": ics_url,
+        "webcal_url": webcal_url,
         "event_count": len(events),
     })
 
@@ -216,6 +243,7 @@ class VoiceScanRequest(BaseModel):
 
 @app.post("/voice-scan", tags=["scan"])
 async def voice_scan(
+    request: Request,
     body: VoiceScanRequest,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
 ) -> JSONResponse:
@@ -264,7 +292,11 @@ async def voice_scan(
     }
 
     if body.return_ics:
-        payload["ics_content"] = generate_ics_string(events, timezone=body.timezone)
+        ics_content = generate_ics_string(events, timezone=body.timezone)
+        ics_url, webcal_url = _store_and_build_urls(ics_content, request)
+        payload["ics_content"] = ics_content
+        payload["ics_url"] = ics_url
+        payload["webcal_url"] = webcal_url
 
     return JSONResponse(content=payload)
 
@@ -318,7 +350,8 @@ def serve_ics(token: str) -> Response:
     return Response(
         content=ics_content,
         media_type="text/calendar; charset=utf-8",
-        headers={"Content-Disposition": 'attachment; filename="calscan.ics"'},
+        # No Content-Disposition: attachment — let the OS/browser decide.
+        # webcal:// links open the native calendar app; direct https:// links download.
     )
 
 
